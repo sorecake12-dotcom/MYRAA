@@ -59,6 +59,18 @@ export function parseVoiceCommand(text: string): AppCommand | null {
     return { type: 'BLUETOOTH_OFF', params: {}, rawInput: text };
   }
 
+  // Battery Check / Battery Status
+  if (
+    lower.includes('battery') ||
+    lower.includes('charge kitna') ||
+    lower.includes('battery status') ||
+    lower.includes('check battery') ||
+    lower.includes('battery percentage') ||
+    lower.includes('kitni battery hai')
+  ) {
+    return { type: 'CHECK_BATTERY', params: {}, rawInput: text };
+  }
+
   // Close app / Close current app
   if (
     lower.includes('app band karo') ||

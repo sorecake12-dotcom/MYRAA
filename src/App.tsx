@@ -15,6 +15,12 @@ import {
   saveCommandLog,
   getHistoryMessages,
 } from './utils/historyStorage';
+import {
+  getDeviceBatteryInfo,
+  checkBatteryLevel,
+  subscribeBatteryChanges,
+  LOW_BATTERY_THRESHOLD,
+} from './utils/batteryService';
 import { TopBar } from './components/TopBar';
 import { OrbAnimationView } from './components/OrbAnimationView';
 import { WaveformView } from './components/WaveformView';
@@ -22,7 +28,7 @@ import { ChatList } from './components/ChatList';
 import { SettingsModal } from './components/SettingsModal';
 import { HistoryModal } from './components/HistoryModal';
 import { FloatingOverlayOrb } from './components/FloatingOverlayOrb';
-import { Mic, Send, VolumeX } from 'lucide-react';
+import { Mic, Send, VolumeX, Loader2 } from 'lucide-react';
 
 const DEFAULT_SETTINGS: MyraSettings = {
   apiKey: '',
@@ -90,6 +96,10 @@ export function App() {
 
   const sessionIdRef = useRef<string>(`session_${Date.now()}`);
   const audioEngineRef = useRef<AudioEngine | null>(null);
+  const hasNotifiedLowBatteryRef = useRef<boolean>(false);
+  const pressStartTimeRef = useRef<number>(0);
+  const isHoldingRef = useRef<boolean>(false);
+  const lastTranscriptRef = useRef<string>('');
 
   // Update Page Title dynamically based on assistantName
   useEffect(() => {
@@ -122,26 +132,6 @@ export function App() {
     setSettings(newSettings);
     localStorage.setItem('myra_settings', JSON.stringify(newSettings));
   };
-
-  // Initial Welcome Greeting from Assistant (if no prior conversation loaded)
-  useEffect(() => {
-    if (messages.length > 0) return;
-
-    const timer = setTimeout(() => {
-      const assistantName = settings.assistantName || 'MYRA';
-      let greeting = `Hey ${settings.userName}! Main ${assistantName} hoon. Aaj kya help chahiye? ❤️`;
-      if (settings.personalityMode === 'PROFESSIONAL') {
-        greeting = `Good day ${settings.userName}. ${assistantName} is online and ready to assist you.`;
-      } else if (settings.personalityMode === 'ASSISTANT') {
-        greeting = `Hello ${settings.userName}! Main ${assistantName} hoon. Main aapki kya help kar sakti hoon?`;
-      }
-
-      addAssistantMessage(greeting);
-      audioEngineRef.current?.speakText(greeting, settings.voice);
-    }, 600);
-
-    return () => clearTimeout(timer);
-  }, []);
 
   const addAssistantMessage = (text: string, commandExecuted?: string) => {
     const timestamp = Date.now();
@@ -202,6 +192,121 @@ export function App() {
     saveHistoryMessage(historyEntry);
   };
 
+  /**
+   * PROACTIVE BATTERY CHECKER FUNCTION:
+   * Checks the device battery level and proactively notifies the user via the assistant
+   * when it drops below 15%.
+   */
+  const checkBatteryLevelAndNotify = async (
+    targetLevel?: number,
+    isCharging = false
+  ): Promise<{ level: number; isLow: boolean; notified: boolean }> => {
+    let level = targetLevel;
+
+    if (level === undefined) {
+      const batteryInfo = await getDeviceBatteryInfo();
+      if (batteryInfo.isSupported) {
+        level = batteryInfo.level;
+        isCharging = batteryInfo.charging;
+      } else {
+        level = deviceState.battery;
+      }
+    }
+
+    // Update current battery state in deviceState
+    setDeviceState((prev) => ({
+      ...prev,
+      battery: level!,
+    }));
+
+    const checkRes = checkBatteryLevel(level!, isCharging, LOW_BATTERY_THRESHOLD);
+
+    if (checkRes.shouldNotify) {
+      if (!hasNotifiedLowBatteryRef.current) {
+        hasNotifiedLowBatteryRef.current = true;
+
+        const assistantName = settings.assistantName || 'MYRA';
+        let alertMessage = '';
+
+        if (settings.personalityMode === 'GF') {
+          alertMessage = `⚠️ Warning ${settings.userName}! Aapki device battery ${level}% par aa gayi hai! Kripya charger connect kijiye taaki humari baat cut na ho ❤️⚡`;
+        } else if (settings.personalityMode === 'PROFESSIONAL') {
+          alertMessage = `⚠️ Critical Battery Alert: Device battery is currently at ${level}%. Please connect to a power source immediately.`;
+        } else {
+          alertMessage = `⚠️ Low Battery Warning: Your device battery level is at ${level}%. Please plug in your charger soon.`;
+        }
+
+        // 1. Add proactive assistant message
+        addAssistantMessage(alertMessage, 'LOW_BATTERY_PROACTIVE_ALERT');
+
+        // 2. Speak voice notification aloud via Assistant Speech Engine
+        setStatusText(`Low Battery Alert (${level}%) ⚡`);
+        setOrbState('speaking');
+        audioEngineRef.current?.speakText(alertMessage, settings.voice, () => {
+          setStatusText('Tap karke bolo 💬');
+          setOrbState('idle');
+        });
+
+        // 3. Update device state notification banner
+        setDeviceState((prev) => ({
+          ...prev,
+          battery: level!,
+          recentNotification: `Low Battery Alert (${level}%)`,
+        }));
+
+        return { level: level!, isLow: true, notified: true };
+      }
+      return { level: level!, isLow: true, notified: false };
+    } else {
+      // If battery level is above 15% or device is charging, reset notification flag
+      if (level! > LOW_BATTERY_THRESHOLD || isCharging) {
+        hasNotifiedLowBatteryRef.current = false;
+      }
+      return { level: level!, isLow: false, notified: false };
+    }
+  };
+
+  // Battery Level Event Listeners & Periodic Background Monitoring
+  useEffect(() => {
+    // Initial battery check on component mount
+    checkBatteryLevelAndNotify();
+
+    // Subscribe to Web Battery API status change events if supported
+    const unsubscribe = subscribeBatteryChanges((info) => {
+      checkBatteryLevelAndNotify(info.level, info.charging);
+    });
+
+    // Periodic check interval (every 10 seconds)
+    const interval = setInterval(() => {
+      checkBatteryLevelAndNotify();
+    }, 10000);
+
+    return () => {
+      unsubscribe();
+      clearInterval(interval);
+    };
+  }, [settings.userName, settings.assistantName, settings.personalityMode, settings.voice]);
+
+  // Initial Welcome Greeting from Assistant (if no prior conversation loaded)
+  useEffect(() => {
+    if (messages.length > 0) return;
+
+    const timer = setTimeout(() => {
+      const assistantName = settings.assistantName || 'MYRA';
+      let greeting = `Hey ${settings.userName}! Main ${assistantName} hoon. Aaj kya help chahiye? ❤️`;
+      if (settings.personalityMode === 'PROFESSIONAL') {
+        greeting = `Good day ${settings.userName}. ${assistantName} is online and ready to assist you.`;
+      } else if (settings.personalityMode === 'ASSISTANT') {
+        greeting = `Hello ${settings.userName}! Main ${assistantName} hoon. Main aapki kya help kar sakti hoon?`;
+      }
+
+      addAssistantMessage(greeting);
+      audioEngineRef.current?.speakText(greeting, settings.voice);
+    }, 600);
+
+    return () => clearTimeout(timer);
+  }, []);
+
   // Command Execution Router with Log Recording
   const executeCommand = (cmd: AppCommand): { notice: string; success: boolean; duration: number } => {
     const startTime = performance.now();
@@ -211,6 +316,23 @@ export function App() {
 
     try {
       switch (cmd.type) {
+        case 'CHECK_BATTERY': {
+          const currentBatt = deviceState.battery;
+          const isLow = currentBatt <= LOW_BATTERY_THRESHOLD;
+          checkBatteryLevelAndNotify(currentBatt, false);
+          resultNotice = `Battery Level: ${currentBatt}%${
+            isLow ? ' ⚠️ (LOW BATTERY WARNING)' : ''
+          }`;
+          break;
+        }
+
+        case 'SET_BATTERY': {
+          const newLevel = cmd.params.level ? parseInt(cmd.params.level, 10) : 10;
+          checkBatteryLevelAndNotify(newLevel, false);
+          resultNotice = `Battery Level Set To: ${newLevel}%`;
+          break;
+        }
+
         case 'OPEN_APP': {
           const appName = cmd.params.appName || 'App';
           setDeviceState((prev) => ({ ...prev, currentApp: appName }));
@@ -255,7 +377,7 @@ export function App() {
         }
 
         case 'WIFI_OFF': {
-          setDeviceState((prev) => ({ ...prev, wifiOn: false }));
+          setDeviceState((prev) => ({ ...prev, wifiOff: false }));
           resultNotice = `Wi-Fi Turned OFF`;
           break;
         }
@@ -368,32 +490,20 @@ export function App() {
     }
   };
 
-  // Mic Button Handler
-  const handleMicClick = () => {
-    if (audioEngineRef.current?.getIsSpeaking()) {
-      // Interrupt speaking
-      audioEngineRef.current.stopPlayback();
-      setStatusText('Tap karke bolo 💬');
-      setOrbState('idle');
-      return;
-    }
-
-    if (orbState === 'listening') {
-      audioEngineRef.current?.stopSpeechRecognition();
-      setStatusText('Tap karke bolo 💬');
-      setOrbState('idle');
-      return;
-    }
-
+  // Helper functions for Voice Recording & Hold-to-Talk Gesture
+  const startListening = () => {
+    lastTranscriptRef.current = '';
     audioEngineRef.current?.initAudioContext();
-    setStatusText('Sun rahi hoon... 🎙️');
+    setStatusText('Sun rahi hoon... 🎙️ (Hold to talk active)');
     setOrbState('listening');
 
     audioEngineRef.current?.startSpeechRecognition(
       (transcript, isFinal) => {
+        lastTranscriptRef.current = transcript;
         if (isFinal) {
           setStatusText(`Recorded: "${transcript}"`);
           handleProcessInput(transcript, 'voice');
+          isHoldingRef.current = false;
         } else {
           setStatusText(`"${transcript}"...`);
         }
@@ -401,8 +511,69 @@ export function App() {
       (err) => {
         setStatusText('Mic Error or Timed out. Type message below 👇');
         setOrbState('idle');
+        isHoldingRef.current = false;
       }
     );
+  };
+
+  const stopListeningAndProcess = () => {
+    audioEngineRef.current?.stopSpeechRecognition();
+    if (lastTranscriptRef.current.trim()) {
+      const recordedInput = lastTranscriptRef.current.trim();
+      setStatusText(`Recorded: "${recordedInput}"`);
+      handleProcessInput(recordedInput, 'voice');
+    } else {
+      setStatusText('Tap or hold mic to speak 💬');
+      setOrbState('idle');
+    }
+  };
+
+  // Hold-To-Talk Gesture: Begin recording on press down
+  const handleMicMouseDown = (e: React.MouseEvent | React.TouchEvent) => {
+    pressStartTimeRef.current = Date.now();
+    isHoldingRef.current = true;
+
+    if (audioEngineRef.current?.getIsSpeaking()) {
+      audioEngineRef.current.stopPlayback();
+      setStatusText('Tap or hold mic to speak 💬');
+      setOrbState('idle');
+      return;
+    }
+
+    if (orbState !== 'listening') {
+      startListening();
+    }
+  };
+
+  // Hold-To-Talk Gesture: Stop recording on release
+  const handleMicMouseUp = () => {
+    if (!isHoldingRef.current) return;
+    const duration = Date.now() - pressStartTimeRef.current;
+    isHoldingRef.current = false;
+
+    // If held for > 250ms, process and stop speech recognition upon release
+    if (duration >= 250 && orbState === 'listening') {
+      stopListeningAndProcess();
+    }
+  };
+
+  // Fallback Tap/Click Handler (for short taps < 250ms)
+  const handleMicClick = () => {
+    const duration = Date.now() - pressStartTimeRef.current;
+    if (duration >= 250) return; // Ignore click if it was handled by hold release
+
+    if (audioEngineRef.current?.getIsSpeaking()) {
+      audioEngineRef.current.stopPlayback();
+      setStatusText('Tap or hold mic to speak 💬');
+      setOrbState('idle');
+      return;
+    }
+
+    if (orbState === 'listening') {
+      stopListeningAndProcess();
+    } else if (orbState === 'idle') {
+      startListening();
+    }
   };
 
   const currentAssistantName = settings.assistantName || 'MYRA';
@@ -427,6 +598,8 @@ export function App() {
         deviceState={deviceState}
         onOpenSettings={() => setShowSettings(true)}
         onOpenHistory={() => setShowHistory(true)}
+        onCheckBattery={() => checkBatteryLevelAndNotify()}
+        onSimulateBatteryChange={(newLevel) => checkBatteryLevelAndNotify(newLevel, false)}
       />
 
       {/* Center Stage: Orb + Waveform + Status */}
@@ -450,6 +623,7 @@ export function App() {
         {/* Quick Voice Trigger Shortcuts Pill */}
         <div className="flex flex-wrap items-center justify-center gap-1.5 max-w-md pt-1">
           {[
+            'battery percentage',
             'YouTube kholo',
             'torch on karo',
             'volume up',
@@ -479,22 +653,41 @@ export function App() {
       <footer className="relative z-20 w-full max-w-xl mx-auto pb-5 px-4 flex flex-col items-center gap-3">
         {/* Main Mic Action Button */}
         <div className="relative flex items-center justify-center">
+          {/* Active Ring Animation when in 'thinking' state */}
+          {orbState === 'thinking' && (
+            <div className="absolute -inset-3 rounded-full border-2 border-dashed border-[#00E676] animate-spin opacity-80 pointer-events-none shadow-[0_0_20px_rgba(0,230,118,0.4)]" />
+          )}
+
+          {/* Glowing aura ring when in 'thinking' state */}
+          {orbState === 'thinking' && (
+            <div className="absolute -inset-1 rounded-full bg-[#00E676]/20 blur-sm animate-pulse pointer-events-none" />
+          )}
+
           <button
             onClick={handleMicClick}
-            className={`w-18 h-18 rounded-full border-2 flex items-center justify-center transition-all shadow-xl ${
+            onMouseDown={handleMicMouseDown}
+            onMouseUp={handleMicMouseUp}
+            onMouseLeave={handleMicMouseUp}
+            onTouchStart={handleMicMouseDown}
+            onTouchEnd={handleMicMouseUp}
+            className={`w-18 h-18 rounded-full border-2 flex items-center justify-center transition-all shadow-xl relative z-10 select-none touch-none ${
               orbState === 'listening'
                 ? 'bg-[#FF1744] border-white text-white scale-110 shadow-[0_0_30px_rgba(255,23,68,0.8)] animate-pulse'
                 : orbState === 'speaking'
                 ? 'bg-[#E040FB] border-white text-white shadow-[0_0_30px_rgba(224,64,251,0.8)]'
+                : orbState === 'thinking'
+                ? 'bg-[#111111] border-[#00E676] text-[#00E676] scale-105 shadow-[0_0_25px_rgba(0,230,118,0.6)]'
                 : 'bg-[#111111] border-[#FF1744] text-[#FF1744] hover:bg-[#FF1744] hover:text-white'
             }`}
             id="main-mic-button"
-            title={`Tap to Speak to ${currentAssistantName} (Tap while speaking to stop)`}
+            title={`Hold to talk or tap to toggle ${currentAssistantName}`}
           >
             {orbState === 'listening' ? (
               <Mic className="w-8 h-8 animate-bounce" />
             ) : orbState === 'speaking' ? (
               <VolumeX className="w-8 h-8" />
+            ) : orbState === 'thinking' ? (
+              <Loader2 className="w-8 h-8 animate-spin text-[#00E676]" />
             ) : (
               <Mic className="w-8 h-8" />
             )}
@@ -502,7 +695,7 @@ export function App() {
         </div>
 
         <span className="text-[10px] font-mono text-[#555555]">
-          Tap mic to speak • Tap while speaking to stop
+          Hold mic to talk • Tap to toggle continuous mode
         </span>
 
         {/* Text Message Input Bar */}

@@ -55,7 +55,9 @@ export type CommandType =
   | 'WIFI_ON'
   | 'WIFI_OFF'
   | 'BLUETOOTH_ON'
-  | 'BLUETOOTH_OFF';
+  | 'BLUETOOTH_OFF'
+  | 'CHECK_BATTERY'
+  | 'SET_BATTERY';
 
 export interface AppCommand {
   type: CommandType;
