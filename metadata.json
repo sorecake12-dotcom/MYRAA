@@ -1,0 +1,6 @@
+{
+  "name": "MYRA AI Companion",
+  "description": "Android AI Voice Assistant with Gemini Live audio, multi-personality engine, command execution, and interactive overlay.",
+  "requestFramePermissions": ["microphone"],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
